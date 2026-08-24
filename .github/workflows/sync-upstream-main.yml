@@ -1,0 +1,74 @@
+name: Sync upstream-main
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror upstream and report JSONL seam status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout maintenance branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream-main mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/Dicklesworthstone/pi_agent_rust.git
+          git fetch upstream main
+          git fetch origin \
+            refs/heads/upstream-main:refs/remotes/origin/upstream-main \
+            refs/heads/enzyme-jsonl-sdk-stable:refs/remotes/origin/enzyme-jsonl-sdk-stable
+
+          upstream_head="$(git rev-parse upstream/main)"
+          previous_mirror="$(git rev-parse origin/upstream-main 2>/dev/null || true)"
+
+          git push \
+            --force-with-lease=refs/heads/upstream-main:"${previous_mirror}" \
+            origin \
+            upstream/main:refs/heads/upstream-main
+
+          stable_head="$(git rev-parse origin/enzyme-jsonl-sdk-stable)"
+          stable_base="$(git rev-parse "${stable_head}^")"
+          stable_tree="$(git rev-parse "${stable_head}^{tree}")"
+          upstream_tree="$(git rev-parse "${upstream_head}^{tree}")"
+
+          {
+            echo "## Upstream mirror"
+            echo
+            echo "- Upstream main: \`${upstream_head}\`"
+            echo "- Previous upstream-main: \`${previous_mirror:-missing}\`"
+            echo "- Production branch: \`enzyme-jsonl-sdk-stable\`"
+            echo "- Production commit: \`${stable_head}\`"
+            echo "- Production base: \`${stable_base}\`"
+            echo "- Production tree: \`${stable_tree}\`"
+            echo "- Upstream tree: \`${upstream_tree}\`"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${stable_head}" != "${upstream_head}" ]]; then
+            echo "::warning title=Production seam needs review::enzyme-jsonl-sdk-stable is intentionally frozen at ${stable_head}; upstream main is ${upstream_head}. Port the JSONL-only SDK seam manually before moving any production dependency pin."
+            {
+              echo "## Port attention"
+              echo
+              echo "\`enzyme-jsonl-sdk-stable\` was not modified. Review current upstream before changing any production dependency pin."
+              echo
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          if git show upstream/main:Cargo.toml | grep -q 'fsqlite'; then
+            echo "::notice title=Current upstream storage dependency::Cargo.toml on upstream main references fsqlite; validate minimal SDK builds exclude SQLite/fsqlite before adoption."
+          fi
